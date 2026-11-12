@@ -1,9 +1,10 @@
-# TEMPLATE (T-014/T-304 option A, T-307). Lives in the separate public repo ArielSoothy/hakolagents-alarm as
+# TEMPLATE (T-014/T-304 option A, T-307, T-309). Lives in the separate public repo ArielSoothy/hakolagents-alarm as
 # .github/workflows/outside-alarm.yml. Kept here outside .github/workflows so it never runs in this private repo.
 # Reads only the public health page; never logs response bodies, the bot token or the Telegram URL.
 # The Mac heartbeat watches this workflow (OUTSIDE_ALARM_STALE when no scheduled run for 3 hours).
 # Pages once per problem: a scheduled run whose previous scheduled run also failed stays quiet, except one
 # reminder per 6 hours of the failing streak; the first OK scheduled run after a failure sends one 'recovered'.
+# T-309: after a delivered scheduled page, optionally fire a diagnose-only cloud helper when the Mac may be absent.
 name: HaKol outside alarm
 on:
   schedule:
@@ -14,6 +15,10 @@ on:
         description: 'Send one TEST Telegram message and exit (no health check)'
         type: boolean
         default: false
+      test_fallback:
+        description: 'Fire the cloud helper once with a TEST payload (no health check)'
+        type: boolean
+        default: false
 permissions:
   actions: read
 concurrency:
@@ -22,7 +27,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Two 15 s reads + the 20-minute confirmation wait + one runs-list read and one Telegram send.
+    # Two 15 s reads + the 20-minute confirmation wait + history, Telegram page, optional 15 s fire and notice.
     timeout-minutes: 30
     steps:
       - name: Check the public health summary
@@ -30,6 +35,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TEST_ALERT: ${{ github.event_name == 'workflow_dispatch' && inputs.test_alert }}
+          CLAUDE_FALLBACK_TOKEN: ${{ secrets.CLAUDE_FALLBACK_TOKEN }}
+          CLAUDE_FALLBACK_ROUTINE: ${{ vars.CLAUDE_FALLBACK_ROUTINE }}
+          TEST_FALLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.test_fallback }}
           GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
@@ -48,6 +56,34 @@ jobs:
             const ok=await send('TEST — HaKol outside alarm works');
             console.log(ok?'OUTSIDE_ALARM_TEST_SENT':'OUTSIDE_ALARM_TEST_NOT_SENT');
             process.exit(ok?0:1);
+          }
+          const fire=async(reason,codes)=>{
+            const token=process.env.CLAUDE_FALLBACK_TOKEN,id=process.env.CLAUDE_FALLBACK_ROUTINE;
+            if(!token||!/^trig_[A-Za-z0-9]{10,64}$/.test(id??'')){
+              console.log('OUTSIDE_ALARM_FALLBACK_NOT_CONFIGURED');return null;
+            }
+            try {
+              const response=await fetch(`https://api.anthropic.com/v1/claude_code/routines/${id}/fire`,{method:'POST',headers:{authorization:'Bearer '+token,'anthropic-version':'2026-10-21','content-type':'application/json'},body:JSON.stringify({text:`HAKOL_FALLBACK v1 reason=${reason} codes=${codes.join(',')} run=${process.env.GITHUB_RUN_ID}`}),signal:AbortSignal.timeout(15000),redirect:'error'});
+              if(response.status===200){
+                let link='';
+                try {
+                  const url=(await response.json())?.claude_code_session_url;
+                  if(typeof url==='string'&&/^https:\/\/claude\.ai\/code\/session_[A-Za-z0-9_]{6,80}$/.test(url))link=url;
+                } catch { /* HTTP 200 is success even without a usable JSON link. */ }
+                console.log('OUTSIDE_ALARM_FALLBACK_FIRED');return {ok:true,link};
+              }
+              const status=response.status;
+              await response.body?.cancel();
+              const label=status===400?'routine paused or bad request (400)':status===401||status===403?`token rejected (${status})`:status===404?'routine not found (404)':status===429?'hourly fire limit (429)':status>=500?`Anthropic side error (${status})`:`request refused (${status})`;
+              console.error('OUTSIDE_ALARM_FALLBACK_REFUSED_'+status);return {ok:false,label};
+            } catch {
+              console.error('OUTSIDE_ALARM_FALLBACK_REFUSED_NETWORK');return {ok:false,label:'no answer'};
+            }
+          };
+          if(process.env.GITHUB_EVENT_NAME==='workflow_dispatch'&&process.env.TEST_FALLBACK==='true'){
+            const result=await fire('test',['TEST']);
+            const sent=result?await send(result.ok?'TEST — cloud helper started'+(result.link?'\n'+result.link:''):'TEST — cloud helper could not start: '+result.label):false;
+            process.exit(result?.ok&&sent?0:1);
           }
           const age=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;
           const check=async()=>{
@@ -101,6 +137,7 @@ jobs:
             // Once per problem: skip when the previous scheduled run also failed, except one reminder per 6 hours
             // of the failing streak. Manual runs and an unreadable history always send.
             const runs=scheduled?await history():null;
+            let reminder=false;
             let heading='HaKol OUTSIDE ALARM (GitHub, independent of the Mac; confirmed on a second read 20 min later):';
             if(runs&&runs[0]?.failed){
               let start=runs[0].at,ended=false;
@@ -111,8 +148,17 @@ jobs:
               if(!remind){console.log('OUTSIDE_ALARM_ALREADY_PAGED previous scheduled run also failed; no message');process.exit(1);}
               heading=`HaKol OUTSIDE ALARM — still failing (reminder; failing since ${new Date(start).toISOString().slice(0,16)}Z):`;
               console.log('OUTSIDE_ALARM_REMINDER');
+              reminder=true;
             }else if(scheduled&&!runs)console.log('OUTSIDE_ALARM_HISTORY_UNKNOWN sending anyway');
-            await send([heading,...problems.map(line=>'- '+line),'Public page: hakolagents.com/api/callit/health/summary'].join('\n'));
+            const paged=await send([heading,...problems.map(line=>'- '+line),'Public page: hakolagents.com/api/callit/health/summary'].join('\n'));
+            if(scheduled&&paged){
+              const codes=problems.map(line=>line.split(' ')[0]).filter(code=>/^(SITE_UNREACHABLE|SITE_RED|ROBOT_SILENT|ROBOT_UNKNOWN|MAC_SILENT|JOB_OVERDUE:[A-Za-z0-9_-]{1,40})$/.test(code)).slice(0,10);
+              const reason=codes.includes('MAC_SILENT')||codes.includes('SITE_UNREACHABLE')?'mac_absent':reminder&&codes.includes('SITE_RED')?'red_streak':null;
+              if(reason){
+                const result=await fire(reason,codes);
+                if(result)await send(result.ok?`Cloud helper started (${reason}). Its report is due in ~15 min in the Claude doc 'HaKol Agents — daily operator log'; no report means it failed.`+(result.link?'\n'+result.link:''):`Cloud helper could not start: ${result.label}. You are the only operator now — see RUNBOOK-jobs.md 'Cloud fallback'.`);
+              }else console.log('OUTSIDE_ALARM_FALLBACK_SKIPPED_MAC_ALIVE');
+            }
           } else {
             console.log('OUTSIDE_ALARM_OK');
             // One 'recovered' message on the first OK scheduled run after a failed one; unknown history sends nothing.
