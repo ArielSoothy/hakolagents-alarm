@@ -1,6 +1,7 @@
 # TEMPLATE (T-014/T-304 option A, T-307, T-309). Lives in the separate public repo ArielSoothy/hakolagents-alarm as
 # .github/workflows/outside-alarm.yml. Kept here outside .github/workflows so it never runs in this private repo.
 # Reads only the public health page; never logs response bodies, the bot token or the Telegram URL.
+# 2026-11-12 15:57 UTC operator #81: no-op comment re-push to re-register the schedule (no scheduled run since 12:56 UTC).
 # The Mac heartbeat watches this workflow (OUTSIDE_ALARM_STALE when no scheduled run for 3 hours).
 # Pages once per problem: a scheduled run whose previous scheduled run also failed stays quiet, except one
 # reminder per 6 hours of the failing streak; the first OK scheduled run after a failure sends one 'recovered'.
