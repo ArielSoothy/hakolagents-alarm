@@ -1,0 +1,125 @@
+# TEMPLATE (T-014/T-304 option A, T-307). Lives in the separate public repo ArielSoothy/hakolagents-alarm as
+# .github/workflows/outside-alarm.yml. Kept here outside .github/workflows so it never runs in this private repo.
+# Reads only the public health page; never logs response bodies, the bot token or the Telegram URL.
+# The Mac heartbeat watches this workflow (OUTSIDE_ALARM_STALE when no scheduled run for 3 hours).
+# Pages once per problem: a scheduled run whose previous scheduled run also failed stays quiet, except one
+# reminder per 6 hours of the failing streak; the first OK scheduled run after a failure sends one 'recovered'.
+name: HaKol outside alarm
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: 'Send one TEST Telegram message and exit (no health check)'
+        type: boolean
+        default: false
+permissions:
+  actions: read
+concurrency:
+  group: outside-alarm
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Two 15 s reads + the 20-minute confirmation wait + one runs-list read and one Telegram send.
+    timeout-minutes: 30
+    steps:
+      - name: Check the public health summary
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_ALERT: ${{ github.event_name == 'workflow_dispatch' && inputs.test_alert }}
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          const send=async text=>{
+            const token=process.env.TELEGRAM_BOT_TOKEN,chat=process.env.TELEGRAM_CHAT_ID;
+            if(!token||!chat){console.error('OUTSIDE_ALARM_TELEGRAM_NOT_CONFIGURED');return false;}
+            try {
+              const sent=await fetch('https://api.telegram.org/bot'+token+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:chat,text}),signal:AbortSignal.timeout(10000),redirect:'error'});
+              await sent.body?.cancel();
+              if(!sent.ok){console.error('OUTSIDE_ALARM_TELEGRAM_FAILED');return false;}
+              return true;
+            } catch { console.error('OUTSIDE_ALARM_TELEGRAM_FAILED'); return false; }
+          };
+          if(process.env.TEST_ALERT==='true'){
+            const ok=await send('TEST — HaKol outside alarm works');
+            console.log(ok?'OUTSIDE_ALARM_TEST_SENT':'OUTSIDE_ALARM_TEST_NOT_SENT');
+            process.exit(ok?0:1);
+          }
+          const age=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;
+          const check=async()=>{
+            const problems=[];
+            let data=null;
+            try {
+              const response=await fetch('https://hakolagents.com/api/callit/health/summary',{signal:AbortSignal.timeout(15000),redirect:'error',cache:'no-store'});
+              // 503 is the documented RED reply and still carries the JSON summary.
+              data=await response.json();
+              if(!data||typeof data!=='object'||Array.isArray(data)||!Array.isArray(data.jobs))data=null;
+            } catch { /* No response bodies, URLs or error text are logged. */ }
+            if(!data)return ['SITE_UNREACHABLE (health page unreachable or not JSON)'];
+            // A robot that runs but fails every journey is never overdue: RED / ok:false is a failure on its own.
+            if(data.ok!==true||data.state==='RED')problems.push(`SITE_RED (site health is ${data.state==='YELLOW'||data.state==='GREEN'?data.state:'RED'}, ok=${data.ok===true})`);
+            const robot=age(data.robot_age_s);
+            if(robot===null)problems.push('ROBOT_UNKNOWN (robot heartbeat age missing)');
+            else if(robot>2700)problems.push(`ROBOT_SILENT (robot last ran ${Math.round(robot/60)} min ago)`);
+            const mac=age(data.mac_age_s);
+            if(mac!==null&&mac>3600)problems.push(`MAC_SILENT (the Mac last checked in ${Math.round(mac/60)} min ago — asleep, off or stuck?)`);
+            const overdue=data.jobs.filter(job=>job&&job.overdue===true).map(job=>String(job.name).replace(/[^a-z0-9_-]/gi,'').slice(0,40));
+            for(const name of overdue)problems.push(`JOB_OVERDUE:${name}`);
+            return problems;
+          };
+          // Earlier completed scheduled runs of this workflow, newest first; null when unreadable.
+          const history=async()=>{
+            const token=process.env.GITHUB_TOKEN,repo=process.env.GITHUB_REPOSITORY,api=process.env.GITHUB_API_URL||'https://api.github.com';
+            if(!token||!repo||!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))return null;
+            try {
+              const response=await fetch(`${api}/repos/${repo}/actions/workflows/outside-alarm.yml/runs?event=schedule&status=completed&per_page=100`,{headers:{authorization:'Bearer '+token,accept:'application/vnd.github+json','x-github-api-version':'2022-11-28'},signal:AbortSignal.timeout(10000),redirect:'error'});
+              if(!response.ok){await response.body?.cancel();return null;}
+              const runs=(await response.json())?.workflow_runs;
+              if(!Array.isArray(runs))return null;
+              const current=String(process.env.GITHUB_RUN_ID??'');
+              return runs.filter(r=>r&&r.event==='schedule'&&r.status==='completed'&&String(r.id)!==current&&Number.isFinite(Date.parse(r.created_at)))
+                .map(r=>({at:Date.parse(r.created_at),failed:['failure','timed_out','startup_failure'].includes(r.conclusion),ok:r.conclusion==='success'}))
+                .filter(r=>r.failed||r.ok).sort((a,b)=>b.at-a.at);
+            } catch { return null; }
+          };
+          const SIX_HOURS=6*3600000,scheduled=process.env.GITHUB_EVENT_NAME==='schedule';
+          let problems=await check();
+          if(problems.length){
+            // One bad read is not an outage. The :17 read and a :19 re-read would both see the same :15 ingest,
+            // so wait 20 minutes (past the next ingest) and read again; page only on the second read's reasons.
+            console.log('OUTSIDE_ALARM_RECHECK first read failed; confirming in 20 min');
+            await new Promise(resolve=>setTimeout(resolve,Number(process.env.OUTSIDE_ALARM_CONFIRM_MS??1200000)));
+            problems=await check();
+          }
+          if(problems.length){
+            for(const line of problems)console.error('OUTSIDE_ALARM_FAILED '+line);
+            process.exitCode=1;
+            // Once per problem: skip when the previous scheduled run also failed, except one reminder per 6 hours
+            // of the failing streak. Manual runs and an unreadable history always send.
+            const runs=scheduled?await history():null;
+            let heading='HaKol OUTSIDE ALARM (GitHub, independent of the Mac; confirmed on a second read 20 min later):';
+            if(runs&&runs[0]?.failed){
+              let start=runs[0].at,ended=false;
+              for(const run of runs){if(run.ok){ended=true;break;}start=run.at;}
+              const now=Date.now();
+              // A streak longer than the 100-run page has no known start: fall back to fixed 6-hour UTC blocks.
+              const remind=ended?Math.floor((now-start)/SIX_HOURS)>Math.floor((runs[0].at-start)/SIX_HOURS):Math.floor(now/SIX_HOURS)>Math.floor(runs[0].at/SIX_HOURS);
+              if(!remind){console.log('OUTSIDE_ALARM_ALREADY_PAGED previous scheduled run also failed; no message');process.exit(1);}
+              heading=`HaKol OUTSIDE ALARM — still failing (reminder; failing since ${new Date(start).toISOString().slice(0,16)}Z):`;
+              console.log('OUTSIDE_ALARM_REMINDER');
+            }else if(scheduled&&!runs)console.log('OUTSIDE_ALARM_HISTORY_UNKNOWN sending anyway');
+            await send([heading,...problems.map(line=>'- '+line),'Public page: hakolagents.com/api/callit/health/summary'].join('\n'));
+          } else {
+            console.log('OUTSIDE_ALARM_OK');
+            // One 'recovered' message on the first OK scheduled run after a failed one; unknown history sends nothing.
+            const runs=scheduled?await history():null;
+            if(runs&&runs[0]?.failed){
+              await send('HaKol outside alarm: recovered — the public health check is OK again.');
+              console.log('OUTSIDE_ALARM_RECOVERED_SENT');
+            }
+          }
+          NODE
