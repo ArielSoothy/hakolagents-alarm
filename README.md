@@ -20,3 +20,7 @@ The operator creates the routine from `docs/ops/cloud-fallback-routine-prompt.md
 Actions → HaKol outside alarm → Run workflow → tick `test_fallback` to fire once with a TEST payload, without a health read. Leave `test_alert` unticked: it takes precedence if both switches are ticked. A successful test sends 'TEST — cloud helper started' and the routine should write a test receipt and push 'HaKol cloud helper test OK'.
 
 With either setting missing, the alarm works exactly as before and sends no extra Telegram. Pause the routine or delete its token secret to stop the helper. A configured but refused fire sends a short 'could not start' Telegram after the alarm page; follow RUNBOOK-jobs.md 'Cloud fallback' in the private repo.
+
+It only reads that public page and this workflow's own run history (built-in `GITHUB_TOKEN`, `actions: read`): no logins, no private data. Secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optionally `CLAUDE_FALLBACK_TOKEN` (can only start that one cloud routine).
+
+Started 2026-11-12. Owner tasks live in the main project's TODO (T-324: keep this repo active).
