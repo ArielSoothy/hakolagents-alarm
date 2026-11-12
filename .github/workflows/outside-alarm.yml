@@ -198,7 +198,7 @@ jobs:
           } catch { /* Never log response bodies, tokens or error text. */ }
           if(created){
             console.log('OUTSIDE_ALARM_WAKE_REQUESTED');
-            const sent=await send(reason==='test'?'TEST — cloud helper wake requested':`Cloud helper wake requested (${reason}). Its report is due in ~15 min in the Claude doc 'HaKol Agents — daily operator log'; no report means it did not start.`);
+            const sent=await send(reason==='test'?'TEST — cloud helper wake requested':`Cloud helper wake requested (${reason}). Its report is due in ~15 min as an issue in github.com/ArielSoothy/hakolagents-alarm/issues; no report means it did not start.`);
             if(!sent)process.exitCode=1;
           }else{
             console.error('OUTSIDE_ALARM_WAKE_FAILED_'+status);

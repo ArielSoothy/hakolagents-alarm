@@ -10,7 +10,7 @@ GitHub turns off scheduled workflows in public repos after 60 days without repos
 
 ## Cloud helper (T-309)
 
-After a scheduled alarm page has reached Telegram, the alarm can request a Claude cloud routine to diagnose and report in the Claude Doc 'HaKol Agents — daily operator log'. It requests a wake when the Mac is silent or the site is unreachable, or on a six-hour reminder for a RED site. v1 only diagnoses and notifies; it never changes production. Manual health checks, recovery messages and suppressed repeat pages never request a wake.
+After a scheduled alarm page has reached Telegram, the alarm can request a Claude cloud routine to diagnose and report as an issue in this repository (Claude-Docs is not available to cloud runs). It requests a wake when the Mac is silent or the site is unreachable, or on a six-hour reminder for a RED site. v1 only diagnoses and notifies; it never changes production. Manual health checks, recovery messages and suppressed repeat pages never request a wake.
 
 The operator creates the routine from `docs/ops/cloud-fallback-routine-prompt.md` in the private repository, with GitHub trigger `release.published` on `ArielSoothy/hakolagents-alarm` and BOTH `ArielSoothy/hakolagents` and `ArielSoothy/hakolagents-alarm` as sources. The Claude GitHub App is already installed for all repos. No personal or routine API token is needed. The built-in `GITHUB_TOKEN` creates one prerelease, tagged `fallback-<run>-<epoch>-<reason>`; there is one POST, a 15-second timeout, and no retry.
 
